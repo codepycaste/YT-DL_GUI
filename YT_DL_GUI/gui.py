@@ -1,70 +1,99 @@
 
-from PySide6.QtWidgets import QMainWindow, QVBoxLayout, QWidget, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QFileDialog, QLabel
-from PySide6.QtCore import Slot, Signal, QTimer, QByteArray, QBuffer, QThreadPool, QRunnable, QObject
+from PySide6.QtWidgets import QMainWindow, QVBoxLayout, QWidget, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QFileDialog, QLabel, QSizePolicy
+from PySide6.QtCore import Slot, QTimer, QByteArray, QBuffer, Qt, QThreadPool
 from PySide6.QtGui import QMovie, QPixmap
-import yt_dlp # move to seperate file
-import requests
+import downloads
 
-class Worker(QRunnable):
+from os import path
+import requests, traceback
+
+class ThumbnailView(QWidget): 
     """
-    worker thread
+    custom QWidget class to deal with resizing pixmap -> Size not great gotta set geometry to something good
     """
-    def __init__(self,ydl_ops,dl_url):
+    def __init__(self): 
         super().__init__()
-        self.ydl_ops = ydl_ops
-        self.dl_url = dl_url
-        self.format_dict = {"mp3 audio" : "140"} # our dict of desired formats for download -> WHEN SELECTING FORMAT FROM DROPDOWN, TAKES THE VALUE FROM HERE FOR DLP
-        self.signals = WorkerSignals()
+        self.label = QLabel(self)
+        self.pixmap = QPixmap()
+        #self.setMargin(20) no attr!
+        layout = QHBoxLayout()
+        layout.addWidget(self.label)
+        self.setLayout(layout)
+        #self.setGeometry #maybe can fix gif issues
+        self.label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.label.setText("Video thumb.") # doesn't show.
+        #self.label.setScaledContents(False) # maybe needed for gif to keep aspect ratio 
 
     @Slot()
-    def run(self): #rename? definitely needs traceback/error handling need to get thumbnail from here also
-        """
-        runs yt_dlp here in seperate thread
-        
-        """
-     
-        with yt_dlp.YoutubeDL(self.ydl_ops) as ydl:
-            info = ydl.extract_info(self.dl_url, download=False)
-            formats = info.get("formats", "formats not found") # -> secondary arg is default return value for get method, implement error checking!
-            thumbnail = info.get("thumbnail","OOPS: no thumbnail found")
-            accepted_quals = ["mp3 audio"] 
-        for data in formats:
-            format = data.get("format") 
-            size = data.get("filesize", None)
-            qual = format[format.index("-")+2:]
-            ID = format[:format.index("-")-1]
-            ext = data.get("ext", "warning: no ext found")
-            #print("ext:",ext)
-            #print("ID",ID) # -> this goes to a dictionary and use it to select format for dlp, don't need to show users 
-            if size is not None and ext == "mp4": 
-                self.format_dict[f"{qual} ~ {"{:.2f}".format(size/1000000)}MB"] = ID 
-                accepted_quals.append(f"{qual} ~ {"{:.2f}".format(size/1000000)}MB") 
-            #size doesn't quite match actual download
-        self.signals.qualities.emit(accepted_quals)
-        self.signals.formats.emit(self.format_dict)
-        self.signals.thumbnail.emit(thumbnail)
-        
+    def start_loading(self) -> None: #play loading wheel gif, not working
+        # NOTE: buffer and loading must be properties or..introduces some kind of buffer error and hard crashes program
+        # gif seems to have issues loop related to starting before updating also..just looks terrible resized
+        wheel = open(path.join(path.dirname(__file__),"./ui/spinner.gif"), "rb") #replace with qtspinner or whatever its called
+        ba = wheel.read()
+        self.buffer = QBuffer()
+        self.buffer.setData(ba)
+        self.loading = QMovie(self.buffer,QByteArray())
+        self.label.setMovie(self.loading)
+        #self.loading.setScaledSize(self.size()) #
+        self.loading.start()
+        self.update_loading() #has to be here? init. resize but looks shite
 
-class WorkerSignals(QObject):
-    """
-    callback/traceback signals from running  worker thread
-    """
-    qualities = Signal(tuple) 
-    formats = Signal(dict) 
-    thumbnail = Signal(str) 
+    def update_loading(self): #scales gif to size of qlabel while keeping aspectratio
+        try:
+            print("scaling .gif") #perhaps issue is here
+            self.movie_size = self.loading.currentPixmap().size() #error checking. ! attr error if not initialised obv!
+            new_size = self.movie_size.scaled(self.size(),Qt.AspectRatioMode.KeepAspectRatio)
+            self.loading.setScaledSize(new_size)
+        except Exception as e:
+            print(f"Unexpected error!")
+            traceback.print_exc 
+            traceback.print_exception #TODO: error handling 
+            if hasattr(e, "message"):
+                print(e.message)
+            else:
+                print(e)
+        finally:
+            print("loading method complete")
+
+    def show_thumbnail(self, url):
+        # some gui freeze here 
+        request = requests.get(url)
+        self.pixmap.loadFromData(request.content) #?
+        print(f"showing thumbnail! size - {self.label.size().height()}x{self.label.size().width()}")
+        self.update_pixmap()
+
+    def update_pixmap(self): 
+        #error: QPixmap::scaled: Pixmap is a null pixmap: must be checked
+        print(f"updating pixmap! size - {self.label.size().height()}x{self.label.size().width()}")
+        thumbnail = self.pixmap.scaled(
+            self.label.size(), 
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+            )
+        print(f"setting pixmap! size - {self.label.size().height()}x{self.label.size().width()}")
+        self.label.setPixmap(thumbnail)
+
+    @Slot()
+    def resizeEvent(self, event): 
+        print(f"resize event triggered! size - {self.label.size().height()}x{self.label.size().width()}")
+        self.update_loading()
+        self.update_pixmap()  
+
+        return super().resizeEvent(event)
 
 class MainWindow(QMainWindow):
     """
     Main Window GUI 
     """
     #TODO: need prompts if video already dl. exceptions/error handling
-    def __init__(self) -> None: #probably set 'global' object properties like urllink here so can access via slots. 
+    def __init__(self) -> None: 
         
         super().__init__()
         self.setWindowTitle("Lightweight YT Downloader V. 0.01")
         #self.setWindowIcon() TODO: choose a cool icon
         self.dl_url = None #TODO: save last link here
-        self.dl_folder = "C:" # TODO: set using method to find default download folder on user system  
+        self.dl_folder = downloads.find_dl_path() 
+        #TODO: set using method to find default download folder on user system: DOUBLE SLASHESS
         self.format_dict = {} #temp dict while wait for one from ydlp worker
         self.init_UI()
         self.ydl_ops = {
@@ -77,90 +106,87 @@ class MainWindow(QMainWindow):
             #"cookiesfrombrowser" : ("firefox", "default?path to cookies.txt?, None, "YouTUbe"), #not neeeded yet   
             #progress hooks: for download bar info?
         } 
-        self.threadpool = QThreadPool()
+        #self.threadpool = QThreadPool()
 
 
-    def init_UI(self): 
+    def init_UI(self): #TODO: have all text resize with window -> down to default minumum ie what it is now!
         layout = QVBoxLayout()
         central = QWidget()
         central.setLayout(layout)
+
         self.link_input = QLineEdit(placeholderText="Paste your Link Here: ") #TODO: input mask/set validator
+        self.link_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.timer = QTimer() #this all makes sure that the link shows up in the box before dlp does anything/maybe don't need now have multithreading
         self.timer.setSingleShot(True)
         self.timer.setInterval(100)
         self.timer.timeout.connect(self.get_link)
+        #show screenshot/preview/thumbnail w. loading wheel
+        self.thumbnail_view = ThumbnailView()
         self.link_input.textChanged.connect(lambda: self.timer.start())
-        self.link_input.textChanged.connect(self.start_loading)     
+        #self.thumbnail_view.setMargin(20)   #
+        #self.thumbnail_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding) # set all this in custom widget init
+        #self.resizeEvent.connect(self.thumbnail_view.resizeEvent) # just plain wrong
+        self.link_input.textChanged.connect(self.thumbnail_view.start_loading)     
 
           
         startdl_button = QPushButton(text = "Start Download")
+        startdl_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         startdl_button.clicked.connect(self.download_button) 
-        layout.addWidget(self.link_input)
-
-        #show screenshot/preview/thumbnail w. loading wheel
-        self.thumbnail_view = QLabel(text="Video Thumbnail")
-        self.thumbnail_view.setMargin(20)
-        #loading wheel
-        wheel = open(r"Loading_icon.gif", "rb") #need a gif in here
-        ba = wheel.read()
-        self.buffer = QBuffer()
-        self.buffer.setData(ba)
-        self.loading = QMovie(self.buffer,QByteArray())
-        #video_thumbnail
-        self.pixmap = QPixmap()
-        
 
         #TODO: download progress bar/completed notification ?from ytdlp: stdout
         #TODO: subtitles selector
         self.quality_pick = QComboBox(placeholderText="Choose Download Quality")
-        layout.addWidget(self.quality_pick)
+        self.quality_pick.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.quality_pick.activated.connect(self.select_formats) 
 
         dl_layout = QHBoxLayout()
         dl_bar = QWidget()
         dl_bar.setLayout(dl_layout) #Can it be more direct? 
+
         self.dl_path = QLineEdit(placeholderText=f"Files downloaded to: {self.dl_folder}") #TODO: set default/input mask/validator.probably rename
-        self.dl_path.textChanged.connect(self.set_dl_path)
+        self.dl_path.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.dl_path.textEdited.connect(self.set_dl_path) #definitely not textchanged...i think infinite loop
+
         dl_dialogue = QPushButton(text = "Choose a Download Folder") #TODO: set icon
+        dl_dialogue.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         dl_dialogue.clicked.connect(self.choose_dl_path)
-        layout.addWidget(self.thumbnail_view)
+
         dl_layout.addWidget(self.dl_path)
         dl_layout.addWidget(dl_dialogue)
+        layout.addWidget(self.thumbnail_view)
+        layout.addWidget(self.link_input)
+        layout.addWidget(self.quality_pick)
         layout.addWidget(dl_bar)
         layout.addWidget(startdl_button) #quite like it at the bottom
+        
         layout.addStretch() 
-        self.setCentralWidget(central)
 
-    
-    def show_thumbnail(self, url):
-        # need some resizing for sure this is massive if leave it alone
-        request = requests.get(url)
-        self.pixmap.loadFromData(request.content)
-        self.thumbnail_view.setPixmap(self.pixmap)
-             
+        self.setCentralWidget(central)
+  
     #slots: 
     @Slot() 
-    def download_button(self) -> None: #TODO: try-except, find the actual function/access point to dlp, maybe just import all?/multi threading>
-       with yt_dlp.YoutubeDL(self.ydl_ops) as ydl: #TODO: multithreading, stdout progress
-           ydl.download(self.dl_url)
+    def download_button(self) -> None: #TODO: try-except, stdout progress, 
+       
+       worker = downloads.Worker(downloads.download,self.ydl_ops,self.dl_url) 
+       QThreadPool().start(worker)
 
     @Slot()
-    def start_loading(self) -> None: #play loading wheel gif
-        self.thumbnail_view.setMovie(self.loading) 
-        self.loading.start()
-        
-             
-
-    @Slot()
-    def get_link(self) -> None: #TODO: input checking 
+    def get_link(self) -> None: #TODO: input checking, rename...extract info? 
         self.dl_url = self.link_input.text()
-        worker = Worker(self.ydl_ops,self.dl_url)
-        self.threadpool.start(worker)
-        worker.signals.qualities.connect(self.add_quals)
-        worker.signals.formats.connect(self.add_formats) 
-        worker.signals.thumbnail.connect(self.show_thumbnail)
+        worker = downloads.Worker(downloads.info_process, self.ydl_ops,self.dl_url)
+        
+        worker.signals.result.connect(self.parse_info)
 
-        ##TODO: get audio from here. ID 140 -> gotta add size of 140/look for other lesser audio quality
+        QThreadPool().start(worker) 
+
+    
+    @Slot()
+    def parse_info(self, info):
+
+        self.add_quals(info[0])
+        self.add_formats(info[1])
+        self.thumbnail_view.show_thumbnail(info[2])
+
 
     def add_quals(self, q):
         self.quality_pick.addItems(q)
@@ -171,10 +197,12 @@ class MainWindow(QMainWindow):
     @Slot()
     def set_dl_path(self) -> None: 
         #TODO: input checking
+        print(f"dl path changed to: {self.dl_path}")
         self.dl_folder = self.dl_path.text()
 
     @Slot()
-    def choose_dl_path(self) -> None: # opens file dialog window for user to choose filepath for saved downloads
+    def choose_dl_path(self) -> None: # opens file dialog window for user to choose filepath for saved downloads, change default direct?? when opens
+        
         file_dialog = QFileDialog()
         file_dialog.setWindowTitle("Choose a download folder")
         file_dialog.setFileMode(QFileDialog.FileMode.Directory)
@@ -182,7 +210,8 @@ class MainWindow(QMainWindow):
 
         if file_dialog.exec():
             selected_path = file_dialog.selectedFiles()[0]
-            self.dl_folder = selected_path #probably use a setter above? instead of direct here 
+            self.dl_folder = selected_path #probably use a setter above? instead of direct here
+            self.dl_path.setText(f"{self.dl_folder}") #hmm
 
     @Slot()
     def select_formats(self): # applies user chosen format(from combobox) to ytdl ops
