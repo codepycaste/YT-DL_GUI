@@ -1,84 +1,159 @@
 
 from PySide6.QtWidgets import QMainWindow, QVBoxLayout, QWidget, QLineEdit, QPushButton, QComboBox, QHBoxLayout, QFileDialog, QLabel, QSizePolicy
-from PySide6.QtCore import Slot, QTimer, QByteArray, QBuffer, Qt, QThreadPool
-from PySide6.QtGui import QMovie, QPixmap
+from PySide6.QtCore import Slot, QTimer, QByteArray, QBuffer, Qt, QThreadPool, QSize, QRect
+from PySide6.QtGui import QMovie, QPixmap, QPainter
 import downloads
 
 from os import path
 import requests, traceback
 
-class ThumbnailView(QWidget): 
+class ThumbnailView(QLabel): 
     """
     custom QWidget class to deal with resizing pixmap -> Size not great gotta set geometry to something good
+    guess we're gonna use the guide on stackexchange. 
+    -> https://stackoverflow.com/questions/77602181/pyside6-how-do-i-resize-a-qlabel-playing-a-qmovie-and-maintain-the-movies-orig
     """
-    def __init__(self): 
-        super().__init__()
-        self.label = QLabel(self)
-        self.pixmap = QPixmap()
-        #self.setMargin(20) no attr!
-        layout = QHBoxLayout()
-        layout.addWidget(self.label)
-        self.setLayout(layout)
-        #self.setGeometry #maybe can fix gif issues
-        self.label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.label.setText("Video thumb.") # doesn't show.
-        #self.label.setScaledContents(False) # maybe needed for gif to keep aspect ratio 
+    def __init__(self, *args, **kwargs): #maybe need some simple flags to determine what to show.
+        super().__init__(*args, **kwargs)
+        self._movieSize = QSize()
+        self._minSize = QSize()
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.buffer = None
+        self.ba = None
+        self._pixmap = QPixmap()
+
+    def minimumSizeHint(self):
+        if self._minSize.isValid():
+            return self._minSize
+        return super().minimumSizeHint()
+    
+    def setMovie(self, movie):
+
+        if self.movie() == movie:
+            return
+        super().setMovie(movie)
+
+        if not isinstance(movie, QMovie) or not movie.isValid():
+            self._movieSize = QSize()
+            self._minSize = QSize()
+            self.updateGeometry()
+            return
+
+        cf = movie.currentFrameNumber()
+        state = movie.state()
+        movie.jumpToFrame(0)
+        count = movie.frameCount() if movie.frameCount() > 0 else 1
+        rect = QRect()
+        for _ in range(count):
+            movie.jumpToNextFrame()
+            rect |= movie.frameRect()
+
+        width = rect.x() + rect.width()
+        height = rect.y() + rect.height()
+
+        if width > 0 and height > 0:
+            self._movieSize = QSize(width, height)
+        else: 
+            pm = movie.currentPixmap()
+            self._movieSize = pm.size()
+
+        minimum = min(self._movieSize.width(), self._movieSize.height()) if self._movieSize.isValid() else 0
+        if minimum <= 0:
+            self._minSize = QSize()
+        else:
+            base = min(4, minimum)
+            maximum = max(self._movieSize.width(), self._movieSize.height())
+            ratio = maximum/minimum if minimum else 1
+            self._minSize = QSize(base, round(base * ratio))
+            if self._movieSize.width() == minimum:
+                self._minSize.transpose()
+
+        movie.jumpToFrame(cf)
+        if state == movie.MovieState.Running:  
+            movie.setPaused(False)
+        self.updateGeometry()
+
+    def paintEvent(self, event):
+        movie = self.movie()
+        if not isinstance(movie, QMovie) or not movie.isValid():
+            super().paintEvent(event)
+            return
+
+        qp = QPainter(self)
+
+        try:
+            self.drawFrame(qp)
+        except Exception:
+            print("Exception encountered during paintEvent")
+
+        cr = self.contentsRect()
+        margin = self.margin()
+        cr.adjust(margin, margin, -margin, -margin)
+
+        style = self.style()
+        alignment = style.visualAlignment(self.layoutDirection(), self.alignment())
+        maybeSize = self._movieSize.scaled(cr.size(), Qt.AspectRatioMode.KeepAspectRatio)
+
+        if maybeSize != movie.scaledSize():
+            movie.setScaledSize(maybeSize)
+            style.drawItemPixmap(
+                qp, cr, alignment, movie.currentPixmap().scaled(cr.size(), Qt.AspectRatioMode.KeepAspectRatio)
+            )
+
+        else:
+            style.drawItemPixmap(
+                qp, cr, alignment, movie.currentPixmap()
+            )
 
     @Slot()
-    def start_loading(self) -> None: #play loading wheel gif, not working
+    def start_loading(self) -> None: 
         # NOTE: buffer and loading must be properties or..introduces some kind of buffer error and hard crashes program
-        # gif seems to have issues loop related to starting before updating also..just looks terrible resized
-        wheel = open(path.join(path.dirname(__file__),"./ui/spinner.gif"), "rb") #replace with qtspinner or whatever its called
-        ba = wheel.read()
-        self.buffer = QBuffer()
-        self.buffer.setData(ba)
-        self.loading = QMovie(self.buffer,QByteArray())
-        self.label.setMovie(self.loading)
-        #self.loading.setScaledSize(self.size()) #
-        self.loading.start()
-        self.update_loading() #has to be here? init. resize but looks shite
+        # wanted to replace with the pyqtspinner but it hasn't been playing well with pyside
 
-    def update_loading(self): #scales gif to size of qlabel while keeping aspectratio
-        try:
-            print("scaling .gif") #perhaps issue is here
-            self.movie_size = self.loading.currentPixmap().size() #error checking. ! attr error if not initialised obv!
-            new_size = self.movie_size.scaled(self.size(),Qt.AspectRatioMode.KeepAspectRatio)
-            self.loading.setScaledSize(new_size)
-        except Exception as e:
-            print(f"Unexpected error!")
-            traceback.print_exc 
-            traceback.print_exception #TODO: error handling 
-            if hasattr(e, "message"):
-                print(e.message)
-            else:
-                print(e)
-        finally:
-            print("loading method complete")
+        if not self.buffer and not self.ba: 
+            gif = path.join(path.dirname(__file__),"ui\\spinner.gif")
+            wheel = open(gif, "rb") 
+            self.ba = wheel.read()
+            self.buffer = QBuffer()
+            self.buffer.setData(self.ba)
+            self.loading = QMovie(self.buffer,QByteArray())
+            self.buffer.close() #!!
+            self.setMovie(self.loading)
+        
+            self.loading.start() #must be here!
 
+        else:
+            self.setMovie(self.loading)
+            self.loading.start()
+
+    @Slot()
     def show_thumbnail(self, url):
-        # some gui freeze here 
         request = requests.get(url)
-        self.pixmap.loadFromData(request.content) #?
-        print(f"showing thumbnail! size - {self.label.size().height()}x{self.label.size().width()}")
+        self._pixmap.loadFromData(request.content) 
+        self.setPixmap(self._pixmap)
         self.update_pixmap()
+    
+    @Slot()
+    def clear_pixmap(self):
+        if self._pixmap.isNull():
+            return
+        else:
+            self._pixmap = QPixmap()
+            self.setPixmap(self._pixmap)
 
     def update_pixmap(self): 
-        #error: QPixmap::scaled: Pixmap is a null pixmap: must be checked
-        print(f"updating pixmap! size - {self.label.size().height()}x{self.label.size().width()}")
-        thumbnail = self.pixmap.scaled(
-            self.label.size(), 
+        thumbnail = self._pixmap.scaled(
+            self.size(), 
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation
             )
-        print(f"setting pixmap! size - {self.label.size().height()}x{self.label.size().width()}")
-        self.label.setPixmap(thumbnail)
+        self.setPixmap(thumbnail)
 
     @Slot()
     def resizeEvent(self, event): 
-        print(f"resize event triggered! size - {self.label.size().height()}x{self.label.size().width()}")
-        self.update_loading()
+        if self._pixmap.isNull():
+            return
         self.update_pixmap()  
-
         return super().resizeEvent(event)
 
 class MainWindow(QMainWindow):
@@ -113,10 +188,17 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout()
         central = QWidget()
         central.setLayout(layout)
+        #thumbnail is  a bit small upper and lower layouts needed
+        upper = QWidget()
+        lower = QWidget()
+        upper_layout = QHBoxLayout()
+        lower_layout = QVBoxLayout()
+        upper.setLayout(upper_layout)
+        lower.setLayout(lower_layout)
 
         self.link_input = QLineEdit(placeholderText="Paste your Link Here: ") #TODO: input mask/set validator
         self.link_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.timer = QTimer() #this all makes sure that the link shows up in the box before dlp does anything/maybe don't need now have multithreading
+        self.timer = QTimer() #this all makes sure that the link shows up in the box before dlp does anything
         self.timer.setSingleShot(True)
         self.timer.setInterval(100)
         self.timer.timeout.connect(self.get_link)
@@ -124,12 +206,11 @@ class MainWindow(QMainWindow):
         self.thumbnail_view = ThumbnailView()
         self.link_input.textChanged.connect(lambda: self.timer.start())
         #self.thumbnail_view.setMargin(20)   #
-        #self.thumbnail_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding) # set all this in custom widget init
-        #self.resizeEvent.connect(self.thumbnail_view.resizeEvent) # just plain wrong
         self.link_input.textChanged.connect(self.thumbnail_view.start_loading)     
 
           
-        startdl_button = QPushButton(text = "Start Download")
+        startdl_button = QPushButton()
+        startdl_button.setText("Start Download")
         startdl_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         startdl_button.clicked.connect(self.download_button) 
 
@@ -145,21 +226,35 @@ class MainWindow(QMainWindow):
 
         self.dl_path = QLineEdit(placeholderText=f"Files downloaded to: {self.dl_folder}") #TODO: set default/input mask/validator.probably rename
         self.dl_path.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.dl_path.textEdited.connect(self.set_dl_path) #definitely not textchanged...i think infinite loop
+        self.dl_path.textEdited.connect(self.set_dl_path) #definitely not textchanged..think infinite loop
 
-        dl_dialogue = QPushButton(text = "Choose a Download Folder") #TODO: set icon
+        dl_dialogue = QPushButton()
+        dl_dialogue.setText("Choose a Download Folder") #TODO: set icon
         dl_dialogue.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         dl_dialogue.clicked.connect(self.choose_dl_path)
 
         dl_layout.addWidget(self.dl_path)
         dl_layout.addWidget(dl_dialogue)
-        layout.addWidget(self.thumbnail_view)
-        layout.addWidget(self.link_input)
-        layout.addWidget(self.quality_pick)
-        layout.addWidget(dl_bar)
-        layout.addWidget(startdl_button) #quite like it at the bottom
         
-        layout.addStretch() 
+        upper_layout.addWidget(self.thumbnail_view)
+        #vid info and progress bar/stdout go in this upper portion
+        info_pain = QWidget()
+        info_layout = QVBoxLayout()
+        self.title_bar = QLabel(text = "Video Title")
+        info_layout.addWidget(self.title_bar)
+        info_pain.setLayout(info_layout)
+        
+
+        upper_layout.addWidget(info_pain)
+
+        lower_layout.addWidget(self.link_input)
+        lower_layout.addWidget(self.quality_pick)
+        lower_layout.addWidget(dl_bar)
+        lower_layout.addWidget(startdl_button) #quite like it at the bottom
+        
+        layout.addWidget(upper)
+        layout.addWidget(lower)
+        #layout.addStretch() 
 
         self.setCentralWidget(central)
   
@@ -186,13 +281,16 @@ class MainWindow(QMainWindow):
         self.add_quals(info[0])
         self.add_formats(info[1])
         self.thumbnail_view.show_thumbnail(info[2])
-
+        self.get_title(info[3])
 
     def add_quals(self, q):
         self.quality_pick.addItems(q)
 
     def add_formats(self, fd):
         self.format_dict = fd
+
+    def get_title(self, title):
+        self.title_bar.setText(title)
 
     @Slot()
     def set_dl_path(self) -> None: 
@@ -214,7 +312,7 @@ class MainWindow(QMainWindow):
             self.dl_path.setText(f"{self.dl_folder}") #hmm
 
     @Slot()
-    def select_formats(self): # applies user chosen format(from combobox) to ytdl ops
+    def select_formats(self): # applies user chosen format(from combobox) to ytdl ops   
         #TODO: reformat! 
         choice = self.quality_pick.currentText()
         ID = self.format_dict[choice] 
@@ -224,125 +322,3 @@ class MainWindow(QMainWindow):
         else: 
             self.ydl_ops["format"] = ID + "+140" 
             self.ydl_ops["merge_output_format"] = "mp4"
-
-#REFERENCE YTDLP INFO/OUTPUT
-
-    """
-info keys(['id', 
-        'title', 
-        'formats', 
-        'thumbnails', 
-        'thumbnail', 
-        'description', 
-        'channel_id', 
-        'channel_url', 
-        'duration', 
-        'view_count', 
-        'average_rating', 
-        'age_limit', 
-        'webpage_url', 
-        'categories', 
-        'tags', 
-        'playable_in_embed', 
-        'live_status', 
-        'media_type', 
-        'release_timestamp', 
-        '_format_sort_fields', 
-        'automatic_captions', 
-        'subtitles', 
-        'comment_count', 
-        'chapters', 
-        'heatmap', 
-        'like_count', 
-        'channel', 
-        'channel_follower_count', 
-        'uploader', 
-        'uploader_id', 
-        'uploader_url', 
-        'upload_date', 
-        'timestamp', 
-        'availability', 
-        'original_url', 
-        'webpage_url_basename', 
-        'webpage_url_domain', 
-        'extractor', 
-        'extractor_key', 
-        'playlist', 
-        'playlist_index', 
-        'display_id', 
-        'fulltitle', 
-        'duration_string', 
-        'release_year', 
-        'is_live', 
-        'was_live', 
-        'requested_subtitles', 
-        '_has_drm', 
-        'epoch', 
-        'requested_formats', 
-        'format', 
-        'format_id', 
-        'ext', 
-        'protocol', 
-        'language', 
-        'format_note', 
-        'filesize_approx', 
-        'tbr', 
-        'width', 
-        'height', 
-        'resolution', 
-        'fps', 
-        'dynamic_range', 
-        'vcodec', 
-        'vbr', 
-        'stretched_ratio', 
-        'aspect_ratio', 
-        'acodec',
-        'abr', 
-        'asr', 
-        'audio_channels'])
-
-[info] Available formats for -6YZ3SAJGzE: 
-ID  EXT   RESOLUTION FPS CH │  FILESIZE   TBR PROTO │ VCODEC        VBR ACODEC      ABR ASR MORE INFO 
-─────────────────────────────────────────────────────────────────────────────────────────────────────────────
-sb2 mhtml 48x27        0    │                 mhtml │ images                                storyboard
-sb1 mhtml 80x45        1    │                 mhtml │ images                                storyboard
-sb0 mhtml 160x90       1    │                 mhtml │ images                                storyboard
-139 m4a   audio only      2 │   1.39MiB   49k https │ audio only        mp4a.40.5   49k 22k low, m4a_dash
-140 m4a   audio only      2 │   3.67MiB  129k https │ audio only        mp4a.40.2  129k 44k medium, m4a_dash
-251 webm  audio only      2 │   3.64MiB  128k https │ audio only        opus       128k 48k medium, webm_dash
-91  mp4   256x144     30    │ ~ 5.20MiB  183k m3u8  │ avc1.4D400C       mp4a.40.5
-160 mp4   256x144     30    │   3.40MiB  120k https │ avc1.4d400c  120k video only          144p, mp4_dash
-93  mp4   640x360     30    │ ~22.32MiB  787k m3u8  │ avc1.4D401E       mp4a.40.2
-134 mp4   640x360     30    │  17.08MiB  602k https │ avc1.4d401e  602k video only          360p, mp4_dash
-18  mp4   640x360     30  2 │ ≈20.71MiB  730k https │ avc1.42001E       mp4a.40.2       44k 360p
-95  mp4   1280x720    30    │ ~68.65MiB 2420k m3u8  │ avc1.64001F       mp4a.40.2
-136 mp4   1280x720    30    │  60.65MiB 2139k https │ avc1.64001f 2139k video only          720p, mp4_dash
-
-48x27 - mhtml ~ storyboardvideo@   0k, 0.42016806722689076fps, video only@  0k
-80x45 - mhtml ~ storyboardvideo@   0k, 0.5042016806722689fps, video only@  0k
-160x90 - mhtml ~ storyboardvideo@   0k, 0.5042016806722689fps, video only@  0k
-audio only - m4a ~ low,   48k, m4a_dash containervideo@   0k, mp4a.40.5@ 48k (22050Hz), 1.39MiB
-audio only - m4a ~ medium,  129k, m4a_dash containervideo@   0k, mp4a.40.2@129k (44100Hz), 3.67MiB
-160x90 - mhtml ~ storyboardvideo@   0k, 0.5042016806722689fps, video only@  0k
-160x90 - mhtml ~ storyboardvideo@   0k, 0.5042016806722689fps, video only@  0k
-audio only - m4a ~ low,   48k, m4a_dash containervideo@   0k, mp4a.40.5@ 48k (22050Hz), 1.39MiB
-audio only - m4a ~ medium,  129k, m4a_dash containervideo@   0k, mp4a.40.2@129k (44100Hz), 3.67MiB
-audio only - webm ~ medium,  128k, webm_dash containervideo@   0k, opus @128k (48000Hz), 3.64MiB
-160x90 - mhtml ~ storyboardvideo@   0k, 0.5042016806722689fps, video only@  0k
-160x90 - mhtml ~ storyboardvideo@   0k, 0.5042016806722689fps, video only@  0k
-audio only - m4a ~ low,   48k, m4a_dash containervideo@   0k, mp4a.40.5@ 48k (22050Hz), 1.39MiB
-audio only - m4a ~ medium,  129k, m4a_dash containervideo@   0k, mp4a.40.2@129k (44100Hz), 3.67MiB
-audio only - webm ~ medium,  128k, webm_dash containervideo@   0k, opus @128k (48000Hz), 3.64MiB
-256x144 - mp4 ~  183k, avc1.4D400C, 30.0fps, mp4a.40.5
-256x144 - mp4 ~  183k, avc1.4D400C, 30.0fps, mp4a.40.5
-256x144 - mp4 ~ 144p,  119k, mp4_dash container, avc1.4d400c@ 119k, 30fps, video only@  0k, 3.40MiB
-640x360 - mp4 ~  786k, avc1.4D401E, 30.0fps, mp4a.40.2
-640x360 - mp4 ~ 360p,  602k, mp4_dash container, avc1.4d401e@ 602k, 30fps, video only@  0k, 17.08MiB
-640x360 - mp4 ~ 360p,  729k, avc1.42001E, 30fps, mp4a.40.2 (44100Hz), ~20.71MiB
-640x360 - mp4 ~ 360p,  729k, avc1.42001E, 30fps, mp4a.40.2 (44100Hz), ~20.71MiB
-1280x720 - mp4 ~ 2419k, avc1.64001F, 30.0fps, mp4a.40.2
-1280x720 - mp4 ~ 720p, 2138k, mp4_dash container, avc1.64001f@2138k, 30fps, video only@  0k, 60.65MiB
-1280x720 - mp4 ~ 2419k, avc1.64001F, 30.0fps, mp4a.40.2
-1280x720 - mp4 ~ 2419k, avc1.64001F, 30.0fps, mp4a.40.2
-1280x720 - mp4 ~ 720p, 2138k, mp4_dash container, avc1.64001f@2138k, 30fps, video only@  0k, 60.65MiB
-    """
